@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Contouring & Measurement</title>
+    <style>
+        .align {
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        #imageSrc {
+            display: none;
+        }
+
+        .canvasLayers {
+            position: relative;
+            height: 160px;
+        }
+
+        #canvasImage {
+            border: 1px solid red;
+            margin-top: 4px;
+            margin-left: -150px;
+            position: absolute;
+            left: 50%;
+            top: 0;
+            z-index: 0
+        }
+
+        #canvasContours {
+            border: 1px solid red;
+            margin-top: 4px;
+            margin-left: -150px;
+            position: absolute;
+            left: 50%;
+            top: 0;
+            z-index: 1
+        }
+
+        #canvasDistance {
+            border: 1px solid red;
+            margin-top: 4px;
+            margin-left: -150px;
+            position: absolute;
+            left: 50%;
+            top: 0;
+            z-index: 3
+        }
+
+        #canvasRubber {
+            border: 1px solid red;
+            margin-top: 4px;
+            margin-left: -150px;
+            position: absolute;
+            left: 50%;
+            top: 0;
+            z-index: 1000
+        }
+
+        #cntOK {
+            width:150px;
+            font-weight: bold;
+            font-size:14px;
+            padding: 4px;
+            margin-top:4px;
+        }
+    </style>
+    <script async src="https://docs.opencv.org/3.4.0/opencv.js" onload="onOpenCvReady();"
+        type="text/javascript"></script>
+</head>
+
+<body>
+    <div class="inputoutput">
+        <img id="imageSrc" alt="No Image" />
+        <div class="caption">imageSrc <input type="file" accept="image/*" id="fileInput" name="file" /></div>
+    </div>
+    <div class="align">
+        <h3>Contouring & Measurement</h3>
+        <div style="margin:4px;">
+            <button id="drawCnt" onclick="handleDrawContour()" disabled>Draw Contour</button>
+            <button id="findRoICnt" onclick="handleRoICnt()" disabled>Find RoI Contour</button>
+            <button id="findTriCnt" onclick="handleTriclassCnt()" disabled>Find Tri-class Contour</button>
+        </div>
+        <div style="margin:4px;">
+            <button id="distance" onclick="handleMeasureDistance()" disabled>Measure Distance</button>
+        </div>
+        <div style="margin:4px;">
+            <button id="clearAll" onclick="handleClearAll()" disabled>Clear All</button>
+            <button id="clearDist" onclick="handleClearDist()" disabled>Clear Distance</button>
+        </div>
+        <div id="canvasContainer" class="canvasLayers">
+            <canvas id="canvasImage"></canvas>
+            <canvas id="canvasContours"></canvas>
+            <canvas id="canvasDistance"></canvas>
+            <canvas id="canvasRubber" onmousedown="handleMouseDown(event)" onmousemove="handleMouseMove(event)"></canvas>
+        </div>
+        <div id="cntCanvases" style="visibility:hidden;">
+            <canvas id="canvasCV_1"></canvas>
+            <canvas id="canvasCV_2"></canvas>
+            <canvas id="canvasCV_0"></canvas>
+            <div><button id="cntOK">Done</button></div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        const MenuOptions = Object.freeze({
+            NONE: 0,
+            DRAW_CNTR: 10,
+            ROI_CNTR: 20,
+            MEASURE_DIST: 30
+        });
+        let imgElement = new Image();
+        let inputElement = document.getElementById('fileInput');
+        let canvasImage = document.getElementById('canvasImage');
+        let canvasContours = document.getElementById('canvasContours');
+        let canvasDistance = document.getElementById('canvasDistance');
+        let canvasRubber = document.getElementById('canvasRubber');
+        let ctxImage = canvasImage.getContext("2d");
+        let ctxContour = canvasContours.getContext("2d");
+        let ctxDistance = canvasDistance.getContext("2d");
+        let ctxRubber = canvasRubber.getContext("2d");
+        let offsetX, offsetY;
+        let actionMode = MenuOptions.ROI_CNTR;
+        let polyline = [];
+        let rubberRect = [];
+        let roiContourObj = null;
+        let roiCnt1 = [];
+        let roiCnt2 = [];
+
+        function onOpenCvReady() {
+            inputElement.addEventListener('change', (e) => {
+                imgElement.src = URL.createObjectURL(e.target.files[0]);
+            }, false);
+
+            imgElement.onload = function () {
+                canvasImage.width = this.width;
+                canvasImage.height = this.height;
+                ctxImage.drawImage(imgElement, 0, 0);
+                canvasContours.width = canvasImage.width;
+                canvasContours.height = canvasImage.height;
+                canvasDistance.width = canvasImage.width;
+                canvasDistance.height = canvasImage.height;
+                canvasRubber.width = canvasImage.width;
+                canvasRubber.height = canvasImage.height;
+                canvasImage.style.marginLeft = -canvasContours.width / 2 + 'px';
+                canvasContours.style.marginLeft = -canvasContours.width / 2 + 'px';
+                canvasDistance.style.marginLeft = -canvasDistance.width / 2 + 'px';
+                canvasRubber.style.marginLeft = -canvasRubber.width / 2 + 'px';
+                document.getElementById('canvasContainer').style.height = canvasContours.height + 10 + 'px';
+                document.getElementById("findRoICnt").disabled = false;
+                reOffset();
+            }
+        }
+
+        function reOffset() {
+            offsetX = canvasContours.getBoundingClientRect().left;
+            offsetY = canvasContours.getBoundingClientRect().top;
+        }
+
+        window.onscroll = function (e) { reOffset(); }
+        window.onresize = function (e) { reOffset(); }
+
+        function getMousePos(evt) {
+            let rect = canvasImage.getBoundingClientRect();
+            return {
+                x: parseInt(evt.clientX - rect.left),
+                y: parseInt(evt.clientY - rect.top)
+            };
+        }
+
+        function findDistance(x, y) {
+            let cnt = [];
+            for (let i = 0; i < polyline.length; i++)
+                cnt.push([polyline[i][0], polyline[i][1]]);
+            obj = getPointPolyDistance([x, y], cnt);
+            ctxDistance.strokeStyle = 'black';
+            ctxDistance.beginPath();
+            ctxDistance.moveTo(x, y);
+            ctxDistance.lineTo(obj.x, obj.y);
+            ctxDistance.closePath();
+            ctxDistance.stroke();
+            ctxDistance.fillStyle = "black";
+            ctxDistance.font = "bold 12px Arial";
+            ctxDistance.fillText("d: " + obj.d.toFixed(2), x + 4, y);
+            document.getElementById("clearDist").disabled = false;
+        }
+
+        function handleRoICnt() {
+            actionMode = MenuOptions.ROI_CNTR;
+            rubberRect.length = 0;
+            document.getElementById("distance").disabled = true;
+            document.getElementById("cntCanvases").style.visibility = 'hidden';
+            ctxDistance.clearRect(0, 0, canvasDistance.width, canvasDistance.height);
+        }
+
+        function handleDrawContour() {
+            alert("To be added")
+        }
+
+        function handleTriclassCnt() {
+            alert("To be Done")
+        }
+
+        function handleMeasureDistance() {
+            actionMode = MenuOptions.MEASURE_DIST;
+        }
+
+        function handleClearAll() {
+            ctxContour.clearRect(0, 0, canvasContours.width, canvasContours.height);
+            ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+            ctxDistance.clearRect(0, 0, canvasDistance.width, canvasDistance.height);
+
+            document.getElementById("cntCanvases").style.visibility = 'hidden';
+            document.getElementById("clearDist").disabled = true;
+            document.getElementById("distance").disabled = true;
+
+            actionMode = MenuOptions.ROI_CNTR;
+            rubberRect.length = 0;
+            polyline.length = 0;
+        }
+
+        function handleClearDist() {
+            ctxDistance.clearRect(0, 0, canvasDistance.width, canvasDistance.height);
+            ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+            document.getElementById("clearDist").disabled = true;
+        }
+
+        function handleMouseDown(e) {
+            mouseX = parseInt(e.clientX - offsetX);
+            mouseY = parseInt(e.clientY - offsetY);
+
+            if (actionMode === MenuOptions.NONE) {
+                alert('Selelct an action, e.g. "Find RoI Contour", "Measure Distance" or "Done"')
+            }
+            else if (actionMode === MenuOptions.MEASURE_DIST) {
+                if (polyline.length > 0) {
+                    ctxDistance.strokeStyle = 'orange';
+                    ctxDistance.beginPath();
+                    ctxDistance.arc(mouseX, mouseY, 1, 0, 2 * Math.PI, true);
+                    ctxDistance.stroke();
+                    findDistance(mouseX, mouseY)
+                }
+                else
+                    alert("Create a contour first")
+            }
+            else if (actionMode === MenuOptions.ROI_CNTR) {
+                rubberRect.push([mouseX, mouseY]);
+                if (rubberRect.length > 0)
+                    document.getElementById("clearAll").disabled = false;
+                if (rubberRect.length === 2) {
+                    actionMode = MenuOptions.NONE;
+                    roiContourObj.findRoIContour();
+                }
+            }
+        }
+
+        function handleMouseMove(e) {
+            mouseX = parseInt(e.clientX - canvasRubber.getBoundingClientRect().left);
+            mouseY = parseInt(e.clientY - canvasRubber.getBoundingClientRect().top);
+
+            e.preventDefault();
+            e.stopPropagation();
+            if (actionMode === MenuOptions.ROI_CNTR && rubberRect.length > 0) {
+                drawRubberbandRect(mouseX, mouseY);
+            }
+        }
+
+        function drawRubberbandRect(x, y) {
+            ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+            ctxRubber.strokeStyle = 'black';
+            ctxRubber.lineWidth = 1;
+            ctxRubber.beginPath();
+            ctxRubber.moveTo(rubberRect[0][0], rubberRect[0][1]);
+            ctxRubber.lineTo(x, rubberRect[0][1]);
+            ctxRubber.lineTo(x, y);
+            ctxRubber.lineTo(rubberRect[0][0], y);
+            ctxRubber.closePath();
+            ctxRubber.stroke();
+        }
+
+        function drawPolygon(close) {
+            ctxContour.clearRect(0, 0, canvasContours.width, canvasContours.height);
+            ctxContour.lineWidth = 1;
+            ctxContour.strokeStyle = 'blue';
+            ctxContour.beginPath();
+            ctxContour.moveTo(polyline[0][0], polyline[0][1]);
+            for (index = 1; index < polyline.length; index++) {
+                ctxContour.lineTo(polyline[index][0], polyline[index][1]);
+            }
+            if (close)
+                ctxContour.closePath();
+            ctxContour.stroke();
+            ctxContour.stroke();
+            ctxContour.fillStyle = 'rgba(0,200,255,0.4)';
+            ctxContour.fill();
+        }
+
+        class RoiContour {
+            constructor() {
+                document.getElementById("canvasCV_0").addEventListener("click", function () {
+                    ctxContour.clearRect(0, 0, canvasContours.width, canvasContours.height);
+                    ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+                    // polyline.length = 0;
+                }, false);
+                document.getElementById("canvasCV_1").addEventListener("click", function () {
+                    polyline = roiCnt1;
+                    drawPolygon(close);
+                    ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+                }, false);
+                document.getElementById("canvasCV_2").addEventListener("click", function () {
+                    polyline = roiCnt2;
+                    drawPolygon(close);
+                    ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+                }, false);
+                document.getElementById("cntOK").addEventListener("click", function () {
+                    ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+                    actionMode = MenuOptions.ROI_CNTR;
+                    rubberRect.length = 0;
+                    document.getElementById("cntCanvases").style.visibility = 'hidden';
+                    if (polyline.length > 0) {
+                        drawPolygon(close);
+                        document.getElementById("distance").disabled = false;
+                    }
+                }, false);
+            }
+
+            findRoIContour = function () {
+                roiCnt1.length = 0;
+                roiCnt2.length = 0;
+                let src = cv.imread(imgElement);
+                let roi = new cv.Mat();
+                let gray = new cv.Mat();
+
+                let xMin = Math.min(rubberRect[0][0], rubberRect[1][0]);
+                let xMax = Math.max(rubberRect[0][0], rubberRect[1][0]);
+                let yMin = Math.min(rubberRect[0][1], rubberRect[1][1]);
+                let yMax = Math.max(rubberRect[0][1], rubberRect[1][1]);
+                let rect = new cv.Rect(xMin, yMin, xMax - xMin, yMax - yMin);
+                let roi_area = (xMax - xMin) * (yMax - yMin);
+                roi = src.roi(rect);
+
+                // gray and threshold image
+                cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY, 0);
+                cv.threshold(gray, gray, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+                cv.imshow('canvasCV_0', gray);
+
+                for (let kernel = 1; kernel <= 2; ++kernel) {
+                    // dilate
+                    let M = cv.Mat.ones(kernel * 2 - 1, kernel * 2 - 1, cv.CV_8U);
+                    let anchor = new cv.Point(-1, -1);
+                    let dilated = new cv.Mat();
+                    cv.dilate(gray, dilated, M, anchor, 1, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+                    M.delete();
+
+                    // find contours
+                    let dst = cv.Mat.zeros(gray.rows, gray.cols, cv.CV_8UC3);
+                    let contours = new cv.MatVector();
+                    let hierarchy = new cv.Mat();
+                    cv.findContours(dilated, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
+
+                    // draw contours with random Scalar
+                    let poly = new cv.MatVector();
+                    for (var i = 0; i < contours.size(); ++i) {
+                        let cnt = contours.get(i);
+                        let cnt_area = cv.contourArea(cnt, false);
+                        if (cnt_area > 0.1 * roi_area && cnt_area < 0.9 * roi_area) {
+                            const points = []
+                            for (let j = 0; j < cnt.data32S.length; j += 2) {
+                                points.push([xMin + cnt.data32S[j], yMin + cnt.data32S[j + 1]])
+                            }
+                            if (kernel === 1) {
+                                roiCnt1 = points;
+                            }
+                            else if (kernel === 2) {
+                                roiCnt2 = points;
+                            }
+                            let color = new cv.Scalar(Math.round(Math.random() * 255), Math.round(Math.random() * 255),
+                                Math.round(Math.random() * 255));
+                            cv.drawContours(dst, contours, i, color, 1, cv.LINE_8, hierarchy, 0);
+                        }
+                        cnt.delete();
+                    }
+                    cv.imshow('canvasCV_' + kernel, dst);
+
+                    dst.delete(); contours.delete(); hierarchy.delete();
+                }
+                document.getElementById("cntCanvases").style.visibility = 'visible';
+                src.delete(); roi.delete(); gray.delete();
+                polyline.length = 0;
+            }
+        }
+
+        window.onload = function () {
+            roiContourObj = new RoiContour()
+        }
+
+        document.addEventListener("keydown", ({ key }) => {
+            if (key === "Escape") {
+                rubberRect.length = 0;
+                ctxRubber.clearRect(0, 0, canvasRubber.width, canvasRubber.height);
+            }
+        })
+
+        // Distance between a point and a contour
+        // reference: https://stackoverflow.com/questions/13370969/
+        function vlen(vector) {
+            return Math.sqrt(vector[0] * vector[0] + vector[1] * vector[1]);
+        }
+
+        function vadd(v1, v2) {
+            return [v1[0] + v2[0], v1[1] + v2[1]];
+        }
+
+        function vsub(v1, v2) {
+            return [v1[0] - v2[0], v1[1] - v2[1]];
+        }
+
+        function vscale(vector, factor) {
+            return [vector[0] * factor, vector[1] * factor];
+        }
+
+        function vnorm(v) {
+            return [-v[1], v[0]];
+        }
+
+        function getPointPolyDistance(point, poly) {
+            var points = [];
+            var dists = poly.map(function (p1, i) {
+                var prev = (i == 0 ? poly.length : i) - 1,
+                    p2 = poly[prev],
+                    line = vsub(p2, p1);
+
+                if (vlen(line) == 0)
+                    return vlen(vsub(point, p1));
+
+                var norm = vnorm(line),
+                    x1 = point[0],
+                    x2 = norm[0],
+                    x3 = p1[0],
+                    x4 = line[0],
+                    y1 = point[1],
+                    y2 = norm[1],
+                    y3 = p1[1],
+                    y4 = line[1],
+
+                    j = (x3 - x1 - x2 * y3 / y2 + x2 * y1 / y2) / (x2 * y4 / y2 - x4),
+                    i;
+
+                if (y2 === 0) {
+                    if (y1 > Math.min(p1[1], p2[1]) && y1 < Math.max(p1[1], p2[1])) {
+                        points.push([p1[0], point[1]])
+                        return Math.abs(p1[0] - point[0])
+                    }
+                    else {
+                        if (vlen(vsub(point, p1)) < vlen(vsub(point, p2)))
+                            points.push(p1)
+                        else
+                            points.push(p2);
+                        return Math.min(
+                            vlen(vsub(point, p1)),
+                            vlen(vsub(point, p2)));
+                    }
+                }
+
+                if (j < 0 || j > 1) {
+                    if (vlen(vsub(point, p1)) < vlen(vsub(point, p2)))
+                        points.push(p1)
+                    else
+                        points.push(p2);
+                    return Math.min(
+                        vlen(vsub(point, p1)),
+                        vlen(vsub(point, p2)));
+                }
+
+                i = (y3 + j * y4 - y1) / y2;
+                vtemp = vscale(norm, i);
+                points.push(vadd(point, vtemp))
+
+                return vlen(vtemp);
+            });
+
+            minDist = Math.min.apply(null, dists);
+            index = dists.indexOf(minDist);
+            return { x: points[index][0], y: points[index][1], d: minDist }
+        }
+    </script>
+</body>
+
+</html>
